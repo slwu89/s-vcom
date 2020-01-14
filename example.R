@@ -1,30 +1,34 @@
 ###############################################################################
-#       ____  ___   __________
-#      / __ \/   | / ____/ __ \
-#     / /_/ / /| |/ /   / / / /
-#    / _, _/ ___ / /___/ /_/ /
-#   /_/ |_/_/  |_\____/_____/
+#
+#      _____     _    ____________  __  ___
+#     / ___/    | |  / / ____/ __ \/  |/  /
+#     \__ \_____| | / / /   / / / / /|_/ /
+#    ___/ /_____/ |/ / /___/ /_/ / /  / /
+#   /____/      |___/\____/\____/_/  /_/
 #
 #   Run mosquito model
-#   February 2019
+#   Sean Wu (slwu89@berkeley.edu)
+#   January 2020
 #
 ###############################################################################
 
 rm(list=ls());gc()
 
-# for both
+# to compile the C++ version
+library(Rcpp)
+
+# plotting packages
 library(here)
 library(ggplot2)
 library(reshape2)
-library(pbmcapply)
 
-# for ensemble runs
+# for running large numbers of stochastic runs in parallel
 library(doSNOW)
 library(parallel)
 library(abind) # for abind
 
-source(here("sim-src/mosquito-equilibrium.R"))
-Rcpp::sourceCpp(here("sim-src/mosquito-both.cpp"))
+source(here::here("sim-src/mosquito-equilibrium.R"))
+Rcpp::sourceCpp(here::here("sim-src/mosquito-both.cpp"))
 
 
 ###############################################################################
@@ -93,50 +97,42 @@ theta <- list(
 
 
 ###############################################################################
-# deterministic approximation
+# deterministic model in R
 ###############################################################################
 
-source(here("sim-src/mosquito-deterministic.R"))
+source(here::here("sim-src/mosquito-deterministic.R"))
 
-# run model against continuous-time equilibria
-with(theta,{
+# this is our time step
+dt <- 0.5
 
-  a0 <<- Q0*f0 # Human biting rate at equilibrium
-  lambdaV <<- a0*iH_eq*bV # Force of infection in mosquitoes at equilibrium
+# assume 500 infectious mosquitoes at equilibrium
+IV_eq <- 500
 
-  IV_eq <<- 500
-  EV_eq <<- durEV*IV_eq*muV
-  SV_eq <<- ((durEV*IV_eq*muV) + ((durEV^2)*IV_eq*(muV^2))) / (durEV*lambdaV)
-  NV_eq <<- IV_eq + EV_eq + SV_eq
+# force of infection on mosquitoes at equilibrium
+lambdaV <- (theta$Q0 * theta$f0) * theta$iH_eq * theta$bV
+theta$lambdaV <- lambdaV
 
-  omega_1 <<- -0.5 * ( (gamma*(muLL/muEL)) - (durEL/durLL) + ((gamma-1)*muLL*durEL) )
-  omega_2 <<- sqrt(
-    (0.25 * (( (gamma*(muLL/muEL)) - (durEL/durLL) + ((gamma-1)*muLL*durEL) )^2)) + (gamma * ((beta*muLL*durEL) / (2*muEL*muV*durLL*(1 + (durPL*muPL)))) )
-  )
-  omega <<- omega_1 + omega_2
+# use discrete-time equilibria
+eq_dt <- calc_eq(theta = theta,dt = dt,IV = IV_eq,lambdaV = lambdaV)
 
-  PL_eq <<- 2*durPL*muV*NV_eq
-  LL_eq <<- 2*muV*durLL*(1 + (durPL*muPL))*NV_eq
-  EL_eq <<- 2*omega*muV*durLL*(1 + (durPL*muPL))*NV_eq
-
-  K <<- (NV_eq*2*durLL*muV*(1 + (durPL*muPL))*gamma*(omega+1)) / ((omega/(muLL*durEL)) - (1/(muLL*durLL)) - 1)
-})
-
-theta_eq <- c(theta,K=K,lambdaV=lambdaV)
-
+# make the node
 node <- make_node()
-node$EL <- EL_eq
-node$LL <- LL_eq
-node$PL <- PL_eq
-node$SV <- SV_eq
-node$EV <- EV_eq
+node$EL <- eq_dt$EL_eq
+node$LL <- eq_dt$LL_eq
+node$PL <- eq_dt$PL_eq
+node$NM <- sum(eq_dt$SV_eq,eq_dt$EV_eq,IV_eq)
+node$SV <- eq_dt$SV_eq
+node$EV <- eq_dt$EV_eq
 node$IV <- IV_eq
 
+# add K to the list of parameters
+theta$K <- eq_dt$K_eq
+
+# run the model for tmax days
 tmax <- 1e3
-dt <- 0.5
 time <- seq(from=1,to=tmax,by=dt)
 
-# sampling grid
+# model output is stored in the matrix sample_pop
 sample_grid <- tsamp <- c(0,seq(from=10,to = tmax,by = 1))
 sample_pop <- matrix(0,nrow=6,ncol=length(sample_grid),dimnames=list(c("EL","LL","PL","SV","EV","IV"),paste0(sample_grid)))
 
@@ -153,7 +149,7 @@ pb <- txtProgressBar(min = 1,max = length(time))
 for(t in 1:length(time)){
 
   # euler step
-  euler_step(node = node,pars = theta_eq,tnow = time[t],dt = dt)
+  euler_step(node = node,pars = theta,tnow = time[t],dt = dt)
 
   # sample the population (done at the very end of the time-step, because its not part of the dynamics)
   if(time[t] == sample_grid[1]){
@@ -170,115 +166,196 @@ for(t in 1:length(time)){
   setTxtProgressBar(pb = pb,value = t)
 }
 
-dat_ct <- data.frame(time=tsamp,SV=sample_pop["SV",],EV=sample_pop["EV",],IV=sample_pop["IV",])
-dat_ct <- melt(dat_ct,"time")
+data_det_R <- data.frame(time=tsamp,SV=sample_pop["SV",],EV=sample_pop["EV",],IV=sample_pop["IV",])
+data_det_R <- melt(data_det_R,"time")
 
-ggplot(data=dat_ct) +
+ggplot(data=data_det_R) +
   geom_line(aes(x=time,y=value,color=variable)) +
   theme_bw()
 
-# use discrete-time equilibria
-eq_dt <- calc_eq(theta = theta_eq,dt = dt,IV = IV_eq,lambdaV = lambdaV)
 
-node <- make_node()
-node$EL <- eq_dt$EL_eq
-node$LL <- eq_dt$LL_eq
-node$PL <- eq_dt$PL_eq
-node$NM <- sum(eq_dt$SV_eq,eq_dt$EV_eq,IV_eq)
-node$SV <- eq_dt$SV_eq
-node$EV <- eq_dt$EV_eq
-node$IV <- IV_eq
+###############################################################################
+# deterministic model in C++
+###############################################################################
 
-theta_eq$K <- eq_dt$K_eq
-
-# sampling grid
-sample_grid <- tsamp <- c(0,seq(from=1,to = tmax,by = 1))
-sample_pop <- matrix(0,nrow=7,ncol=length(sample_grid),dimnames=list(c("EL","LL","PL","NM","SV","EV","IV"),paste0(sample_grid)))
-
-sample_pop["EL",1] <- node$EL
-sample_pop["LL",1] <- node$LL
-sample_pop["PL",1] <- node$PL
-sample_pop["NM",1] <- node$NM
-sample_pop["SV",1] <- node$SV
-sample_pop["EV",1] <- node$EV
-sample_pop["IV",1] <- node$IV
-sample_grid <- sample_grid[-1]
-
-# run simulation
-pb <- txtProgressBar(min = 1,max = length(time))
-for(t in 1:length(time)){
-
-  # euler step
-  euler_step(node = node,pars = theta_eq,tnow = time[t],dt = dt)
-
-  # sample the population (done at the very end of the time-step, because its not part of the dynamics)
-  if(time[t] == sample_grid[1]){
-
-    sample_pop["EL",as.character(sample_grid[1])] <- node$EL
-    sample_pop["LL",as.character(sample_grid[1])] <- node$LL
-    sample_pop["PL",as.character(sample_grid[1])] <- node$PL
-    sample_pop["NM",as.character(sample_grid[1])] <- node$NM
-    sample_pop["SV",as.character(sample_grid[1])] <- node$SV
-    sample_pop["EV",as.character(sample_grid[1])] <- node$EV
-    sample_pop["IV",as.character(sample_grid[1])] <- node$IV
-    sample_grid <- sample_grid[-1]
-
-  }
-  setTxtProgressBar(pb = pb,value = t)
-}
-
-dat_dt <- data.frame(time=tsamp,NM=sample_pop["NM",],SV=sample_pop["SV",],EV=sample_pop["EV",],IV=sample_pop["IV",])
-dat_dt <- melt(dat_dt,"time")
-
-ggplot(data=dat_dt) + 
-  geom_line(aes(x=time,y=value,color=variable)) +
-  theme_bw()
-
-dat_comb <- merge(dat_ct,dat_dt,by=c("time","variable"),suffixes = c("ct","dt"))
-dat_comb <- melt(dat_comb,id.vars=c("time","variable"),measure.vars = c("valuect","valuedt"))
-colnames(dat_comb) <- c("time","state","model","count")
-
-ggplot(data=dat_comb) +
-  geom_line(aes(x=time,y=count,color=state,linetype=model),size=1.05) +
-  theme_bw()
-
-# test C++ version
+# the C++ code needs the intervention parameters in a seperate list
 int_pars <- list(
-  ITNcov = 0.5, # ITN coverage
-  IRScov = 0.25, # IRS coverave
-  time_ITN_on = 250, # When ITNs are applied (days)
-  time_IRS_on = 500 # When IRS is applied (days)
+  ITNcov = 0.5,
+  IRScov = 0.25,
+  time_ITN_on = 250,
+  time_IRS_on = 500
 )
-dat_cpp_det <- test_deterministic(time = time,dt = dt,
-                                  EL = eq_dt$EL_eq,
-                                  LL = eq_dt$LL_eq,
-                                  PL = eq_dt$PL_eq,
-                                  SV = eq_dt$SV_eq,
-                                  EV = eq_dt$EV_eq,
-                                  IV = IV_eq,
-                                  K_ = eq_dt$K_eq,
-                                  pars_ = theta_eq,int_pars_ = int_pars)
 
-dat_cpp_det <- as.data.frame(dat_cpp_det[,4:6])
-dat_cpp_det <- cbind(time=time,dat_cpp_det)
-dat_cpp_det <- melt(dat_cpp_det,"time")
-dat_cpp_det <- cbind(dat_cpp_det,language = rep("C++",nrow(dat_cpp_det)))
+data_det_C <- cpp_deterministic(
+  time = time,
+  dt = dt,
+  EL = eq_dt$EL_eq,
+  LL = eq_dt$LL_eq,
+  PL = eq_dt$PL_eq,
+  SV = eq_dt$SV_eq,
+  EV = eq_dt$EV_eq,
+  IV = IV_eq,
+  K_ = eq_dt$K_eq,
+  pars_ = theta,
+  int_pars_ = int_pars
+)
 
-dat_dt_R <- dat_dt
-dat_dt_R <- cbind(dat_dt_R,language = rep("R",nrow(dat_dt_R)))
+data_det_C <- as.data.frame(data_det_C[,4:6])
+data_det_C <- cbind(time=time,data_det_C)
+data_det_C <- melt(data_det_C,"time")
 
-deterministic_comp <- rbind(dat_cpp_det,dat_dt_R)
-
-ggplot(data=deterministic_comp) +
-  geom_line(aes(x=time,y=value,color=variable,linetype=language),size=1.05,alpha=0.5) +
+ggplot(data=data_det_C) +
+  geom_line(aes(x=time,y=value,color=variable)) +
   theme_bw()
+
+
+###############################################################################
+# stochastic model in R
+###############################################################################
+
+source(here::here("sim-src/mosquito-stochastic.R"))
+
+# because we are using the stochastic model, we will run 100 simulations and plot averages/quantiles
+
+# ensemble run parameters
+nruns <- 100
+
+# make a parallel cluster with 4 cores
+cl <- makeSOCKcluster(4)
+registerDoSNOW(cl)
+
+# combine each matrix (sweep over cells) into a slice of a 3d array
+acomb <- function(...) abind(..., along=3)
+
+# progress bar
+pb <- txtProgressBar(max = nruns, style=3)
+progress <- function(n){setTxtProgressBar(pb, n)}
+opts <- list(progress=progress)
+
+# we want output every day
+tsamp <- c(0,seq(from=1,to = tmax,by = 1))
+
+# array's 3rd dimension is over runs
+sample_pop_dt <- foreach(i = 1:nruns, .combine = "acomb", .options.snow=opts,.packages=c("foreach")) %dopar% {
+
+  # output
+  sample_grid <- tsamp
+  sample_pop <- matrix(0,nrow=6,ncol=length(sample_grid),dimnames=list(c("EL","LL","PL","SV","EV","IV"),paste0(sample_grid)))
+
+  # make the node
+  node <- make_node()
+  node$EL <- as.integer(eq_dt$EL_eq)
+  node$LL <- as.integer(eq_dt$LL_eq)
+  node$PL <- as.integer(eq_dt$PL_eq)
+  node$SV <- as.integer(eq_dt$SV_eq)
+  node$EV <- as.integer(eq_dt$EV_eq)
+  node$IV <- as.integer(IV_eq)
+
+  # record output
+  sample_pop["EL",1] <- node$EL
+  sample_pop["LL",1] <- node$LL
+  sample_pop["PL",1] <- node$PL
+  sample_pop["SV",1] <- node$SV
+  sample_pop["EV",1] <- node$EV
+  sample_pop["IV",1] <- node$IV
+  sample_grid <- sample_grid[-1]
+
+  # run simulation
+  for(t in 1:length(time)){
+
+    # euler step
+    euler_step(node = node,pars = theta,tnow = time[t],dt = dt)
+
+    # sample the population (done at the very end of the time-step, because its not part of the dynamics)
+    if(time[t] == sample_grid[1]){
+
+      sample_pop["EL",as.character(sample_grid[1])] <- node$EL
+      sample_pop["LL",as.character(sample_grid[1])] <- node$LL
+      sample_pop["PL",as.character(sample_grid[1])] <- node$PL
+      sample_pop["SV",as.character(sample_grid[1])] <- node$SV
+      sample_pop["EV",as.character(sample_grid[1])] <- node$EV
+      sample_pop["IV",as.character(sample_grid[1])] <- node$IV
+      sample_grid <- sample_grid[-1]
+
+    }
+  }
+
+  sample_pop
+}
+
+close(pb)
+stopCluster(cl);rm(cl);gc()
+
+# we want to plot the mean and 95% quantiles
+
+# plot the output (correct equilibrium)
+mean_SV_dt <- rowMeans(sample_pop_dt["SV",,])
+mean_EV_dt <- rowMeans(sample_pop_dt["EV",,])
+mean_IV_dt <- rowMeans(sample_pop_dt["IV",,])
+
+traj_SV_dt <- melt(sample_pop_dt["SV",,])
+colnames(traj_SV_dt) <- c("time","run","count")
+traj_EV_dt <- melt(sample_pop_dt["EV",,])
+colnames(traj_EV_dt) <- c("time","run","count")
+traj_IV_dt <- melt(sample_pop_dt["IV",,])
+colnames(traj_IV_dt) <- c("time","run","count")
+
+quant_95 <- c(0.025,0.975)
+quant_SV_dt <- apply(X = sample_pop_dt["SV",,],MARGIN = 1,FUN = function(x){
+  quantile(x,probs = quant_95)
+})
+quant_EV_dt <- apply(X = sample_pop_dt["EV",,],MARGIN = 1,FUN = function(x){
+  quantile(x,probs = quant_95)
+})
+quant_IV_dt <- apply(X = sample_pop_dt["IV",,],MARGIN = 1,FUN = function(x){
+  quantile(x,probs = quant_95)
+})
+
+plot_datSV_dt <- data.frame(time=tsamp,SV=mean_SV_dt,SV_l=quant_SV_dt[1,],SV_h=quant_SV_dt[2,])
+plot_datEV_dt <- data.frame(time=tsamp,EV=mean_EV_dt,EV_l=quant_EV_dt[1,],EV_h=quant_EV_dt[2,])
+plot_datIV_dt <- data.frame(time=tsamp,IV=mean_IV_dt,IV_l=quant_IV_dt[1,],IV_h=quant_IV_dt[2,])
+
+# plot mean and 95% quantiles
+ggplot() +
+  geom_line(data=plot_datSV_dt,aes(x=time,y=SV),color="darkorchid2") +
+  geom_ribbon(data=plot_datSV_dt,aes(x=time,ymin=SV_l,ymax=SV_h),alpha=0.35,fill="darkorchid2") +
+  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="dodgerblue2") +
+  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue2") +
+  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
+  geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
+  ylab("Counts") +
+  xlab("Time") +
+  theme_bw()
+
+# plot individual simulation trajectores (takes a while)
+ggplot() +
+  geom_line(data=traj_SV_dt,aes(x=time,y=count),color="darkorchid2",alpha=0.25) +
+  geom_line(data=traj_EV_dt,aes(x=time,y=count),color="dodgerblue2",alpha=0.25) +
+  geom_line(data=traj_IV_dt,aes(x=time,y=count),color="firebrick2",alpha=0.25) +
+  theme_bw()
+
+
+
+
+###############################################################################
+# stochastic model in C++
+###############################################################################
+
+
+
+
+
+
+
+
+
 
 
 ###############################################################################
 # stochastic approximation
 ###############################################################################
 
-source(here("sim-src/mosquito-stochastic.R"))
+source(here::here("sim-src/mosquito-stochastic.R"))
 
 # run model against continuous-time equilibria
 with(theta,{

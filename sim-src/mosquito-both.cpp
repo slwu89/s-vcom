@@ -476,7 +476,7 @@ std::vector<double> test_time(const double tmax, const double dt){
 };
 
 // [[Rcpp::export]]
-Rcpp::NumericMatrix test_deterministic(const std::vector<double> time, const double dt, const double EL_, const double LL_, const double PL_, const double SV_, const double EV_, const double IV_, const double K_, const Rcpp::List pars_, const Rcpp::List int_pars_){
+Rcpp::NumericMatrix cpp_deterministic(const std::vector<double> time, const double dt, const double EL_, const double LL_, const double PL_, const double SV_, const double EV_, const double IV_, const double K_, const Rcpp::List pars_, const Rcpp::List int_pars_){
 
   /* grid of times to simulate */
   // std::vector<double> time((int)tmax/dt-1,0.0);
@@ -509,7 +509,7 @@ Rcpp::NumericMatrix test_deterministic(const std::vector<double> time, const dou
 
 
 // [[Rcpp::export]]
-Rcpp::IntegerMatrix test_stochastic(const std::vector<double> time, const double dt, const int EL_, const int LL_, const int PL_, const int SV_, const int EV_, const int IV_, const double K_, const Rcpp::List pars_, const Rcpp::List int_pars_){
+Rcpp::IntegerMatrix cpp_stochastic(const std::vector<double> time, const double dt, const int EL_, const int LL_, const int PL_, const int SV_, const int EV_, const int IV_, const double K_, const Rcpp::List pars_, const Rcpp::List int_pars_){
 
   /* grid of times to simulate */
   // std::vector<double> time((int)tmax/dt-1,0.0);
