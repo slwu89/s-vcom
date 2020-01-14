@@ -106,8 +106,8 @@ source(here::here("sim-src/mosquito-deterministic.R"))
 # this is our time step
 dt <- 0.5
 
-# assume 500 infectious mosquitoes at equilibrium
-IV_eq <- 500
+# assume 100 infectious mosquitoes at equilibrium
+IV_eq <- 100
 
 # force of infection on mosquitoes at equilibrium
 lambdaV <- (theta$Q0 * theta$f0) * theta$iH_eq * theta$bV
