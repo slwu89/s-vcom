@@ -23,6 +23,7 @@ library(ggplot2)
 library(reshape2)
 
 # for running large numbers of stochastic runs in parallel
+library(foreach)
 library(doSNOW)
 library(parallel)
 library(abind) # for abind
@@ -335,318 +336,30 @@ ggplot() +
   theme_bw()
 
 
-
-
 ###############################################################################
 # stochastic model in C++
 ###############################################################################
 
+# run ensemble of stochastic simulations
+# combine each matrix (sweep over cells) into a slice of a 3d array
+acomb <- function(...) abind(..., along=3)
 
+# array's 3rd dimension is over runs
+sample_pop_cpp <- foreach(i = 1:nruns, .combine = "acomb", .packages=c("foreach")) %do% {
 
-
-
-
-
-
-
-
-
-###############################################################################
-# stochastic approximation
-###############################################################################
-
-source(here::here("sim-src/mosquito-stochastic.R"))
-
-# run model against continuous-time equilibria
-with(theta,{
-
-  a0 <<- Q0*f0 # Human biting rate at equilibrium
-  lambdaV <<- a0*iH_eq*bV # Force of infection in mosquitoes at equilibrium
-
-  IV_eq <<- 500
-  EV_eq <<- durEV*IV_eq*muV
-  SV_eq <<- ((durEV*IV_eq*muV) + ((durEV^2)*IV_eq*(muV^2))) / (durEV*lambdaV)
-  NV_eq <<- IV_eq + EV_eq + SV_eq
-
-  omega_1 <<- -0.5 * ( (gamma*(muLL/muEL)) - (durEL/durLL) + ((gamma-1)*muLL*durEL) )
-  omega_2 <<- sqrt(
-    (0.25 * (( (gamma*(muLL/muEL)) - (durEL/durLL) + ((gamma-1)*muLL*durEL) )^2)) + (gamma * ((beta*muLL*durEL) / (2*muEL*muV*durLL*(1 + (durPL*muPL)))) )
+  sample_pop <- cpp_stochastic(
+    time = time,
+    dt = dt,
+    EL_ = as.integer(eq_dt$EL_eq),
+    LL_ = as.integer(eq_dt$LL_eq),
+    PL_ = as.integer(eq_dt$PL_eq),
+    SV_ = as.integer(eq_dt$SV_eq),
+    EV_ = as.integer(eq_dt$EV_eq),
+    IV_ = as.integer(IV_eq),
+    K_ = eq_dt$K_eq,
+    pars_ = theta,
+    int_pars_ = int_pars
   )
-  omega <<- omega_1 + omega_2
-
-  PL_eq <<- 2*durPL*muV*NV_eq
-  LL_eq <<- 2*muV*durLL*(1 + (durPL*muPL))*NV_eq
-  EL_eq <<- 2*omega*muV*durLL*(1 + (durPL*muPL))*NV_eq
-
-  K <<- (NV_eq*2*durLL*muV*(1 + (durPL*muPL))*gamma*(omega+1)) / ((omega/(muLL*durEL)) - (1/(muLL*durLL)) - 1)
-})
-
-theta_eq <- c(theta,K=K,lambdaV=lambdaV)
-
-# ensemble run parameters
-nruns <- 100
-tmax <- 1e3
-dt <- 1
-time <- seq(from=1,to=tmax,by=dt)
-
-# sampling grid
-tsamp <- c(0,seq(from=1,to = tmax,by = 1))
-
-# run ensemble of stochastic simulations
-cl <- makeSOCKcluster(4)
-registerDoSNOW(cl)
-
-# combine each matrix (sweep over cells) into a slice of a 3d array
-acomb <- function(...) abind(..., along=3)
-
-# progress bar
-pb <- txtProgressBar(max = nruns, style=3)
-progress <- function(n){setTxtProgressBar(pb, n)}
-opts <- list(progress=progress)
-
-# array's 3rd dimension is over runs
-sample_pop_ct <- foreach(i = 1:nruns, .combine = "acomb", .options.snow=opts,.packages=c("foreach")) %dopar% {
-
-  # output
-  sample_grid <- tsamp
-  sample_pop <- matrix(0,nrow=6,ncol=length(sample_grid),dimnames=list(c("EL","LL","PL","SV","EV","IV"),paste0(sample_grid)))
-
-  # make the node
-  node <- make_node()
-  node$EL <- as.integer(EL_eq)
-  node$LL <- as.integer(LL_eq)
-  node$PL <- as.integer(PL_eq)
-  node$SV <- as.integer(SV_eq)
-  node$EV <- as.integer(EV_eq)
-  node$IV <- as.integer(IV_eq)
-
-  # record output
-  sample_pop["EL",1] <- node$EL
-  sample_pop["LL",1] <- node$LL
-  sample_pop["PL",1] <- node$PL
-  sample_pop["SV",1] <- node$SV
-  sample_pop["EV",1] <- node$EV
-  sample_pop["IV",1] <- node$IV
-  sample_grid <- sample_grid[-1]
-
-  # run simulation
-  for(t in 1:length(time)){
-
-    # euler step
-    euler_step(node = node,pars = theta_eq,tnow = time[t],dt = dt)
-
-    # sample the population (done at the very end of the time-step, because its not part of the dynamics)
-    if(time[t] == sample_grid[1]){
-
-      sample_pop["EL",as.character(sample_grid[1])] <- node$EL
-      sample_pop["LL",as.character(sample_grid[1])] <- node$LL
-      sample_pop["PL",as.character(sample_grid[1])] <- node$PL
-      sample_pop["SV",as.character(sample_grid[1])] <- node$SV
-      sample_pop["EV",as.character(sample_grid[1])] <- node$EV
-      sample_pop["IV",as.character(sample_grid[1])] <- node$IV
-      sample_grid <- sample_grid[-1]
-
-    }
-  }
-
-  sample_pop
-}
-
-close(pb)
-stopCluster(cl);rm(cl);gc()
-
-# plot the output (incorrect equilibrium)
-mean_SV_ct <- rowMeans(sample_pop_ct["SV",,])
-mean_EV_ct <- rowMeans(sample_pop_ct["EV",,])
-mean_IV_ct <- rowMeans(sample_pop_ct["IV",,])
-
-quant_SV_ct <- apply(X = sample_pop_ct["SV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-quant_EV_ct <- apply(X = sample_pop_ct["EV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-quant_IV_ct <- apply(X = sample_pop_ct["IV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-
-plot_datEV_ct <- data.frame(time=tsamp,EV=mean_EV_ct,EV_l=quant_EV_ct[1,],EV_h=quant_EV_ct[2,])
-plot_datIV_ct <- data.frame(time=tsamp,IV=mean_IV_ct,IV_l=quant_IV_ct[1,],IV_h=quant_IV_ct[2,])
-
-# ggplot() +
-#   geom_line(data=plot_datEV_ct,aes(x=time,y=EV),color="steelblue") +
-#   geom_ribbon(data=plot_datEV_ct,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="steelblue") +
-#   geom_line(data=plot_datIV_ct,aes(x=time,y=IV),color="firebrick3") +
-#   geom_ribbon(data=plot_datIV_ct,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick3") +
-#   theme_bw()
-
-
-# use discrete-time equilibria
-eq_dt <- calc_eq(theta = theta_eq,dt = dt,IV = IV_eq,lambdaV = lambdaV)
-
-theta_eq$K <- eq_dt$K_eq
-
-# run ensemble of stochastic simulations
-cl <- makeSOCKcluster(4)
-registerDoSNOW(cl)
-
-# combine each matrix (sweep over cells) into a slice of a 3d array
-acomb <- function(...) abind(..., along=3)
-
-# progress bar
-pb <- txtProgressBar(max = nruns, style=3)
-progress <- function(n){setTxtProgressBar(pb, n)}
-opts <- list(progress=progress)
-
-# array's 3rd dimension is over runs
-sample_pop_dt <- foreach(i = 1:nruns, .combine = "acomb", .options.snow=opts,.packages=c("foreach")) %dopar% {
-
-  # output
-  sample_grid <- tsamp
-  sample_pop <- matrix(0,nrow=6,ncol=length(sample_grid),dimnames=list(c("EL","LL","PL","SV","EV","IV"),paste0(sample_grid)))
-
-  # make the node
-  node <- make_node()
-  node$EL <- as.integer(eq_dt$EL_eq)
-  node$LL <- as.integer(eq_dt$LL_eq)
-  node$PL <- as.integer(eq_dt$PL_eq)
-  node$SV <- as.integer(eq_dt$SV_eq)
-  node$EV <- as.integer(eq_dt$EV_eq)
-  node$IV <- as.integer(IV_eq)
-
-  # record output
-  sample_pop["EL",1] <- node$EL
-  sample_pop["LL",1] <- node$LL
-  sample_pop["PL",1] <- node$PL
-  sample_pop["SV",1] <- node$SV
-  sample_pop["EV",1] <- node$EV
-  sample_pop["IV",1] <- node$IV
-  sample_grid <- sample_grid[-1]
-
-  # run simulation
-  for(t in 1:length(time)){
-
-    # euler step
-    euler_step(node = node,pars = theta_eq,tnow = time[t],dt = dt)
-
-    # sample the population (done at the very end of the time-step, because its not part of the dynamics)
-    if(time[t] == sample_grid[1]){
-
-      sample_pop["EL",as.character(sample_grid[1])] <- node$EL
-      sample_pop["LL",as.character(sample_grid[1])] <- node$LL
-      sample_pop["PL",as.character(sample_grid[1])] <- node$PL
-      sample_pop["SV",as.character(sample_grid[1])] <- node$SV
-      sample_pop["EV",as.character(sample_grid[1])] <- node$EV
-      sample_pop["IV",as.character(sample_grid[1])] <- node$IV
-      sample_grid <- sample_grid[-1]
-
-    }
-  }
-
-  sample_pop
-}
-
-close(pb)
-stopCluster(cl);rm(cl);gc()
-
-# plot the output (correct equilibrium)
-mean_SV_dt <- rowMeans(sample_pop_dt["SV",,])
-mean_EV_dt <- rowMeans(sample_pop_dt["EV",,])
-mean_IV_dt <- rowMeans(sample_pop_dt["IV",,])
-
-traj_EV_dt <- melt(sample_pop_dt["EV",,])
-colnames(traj_EV_dt) <- c("time","run","count")
-traj_IV_dt <- melt(sample_pop_dt["IV",,])
-colnames(traj_IV_dt) <- c("time","run","count")
-
-quant_SV_dt <- apply(X = sample_pop_dt["SV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-quant_EV_dt <- apply(X = sample_pop_dt["EV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-quant_IV_dt <- apply(X = sample_pop_dt["IV",,],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
-})
-
-plot_datEV_dt <- data.frame(time=tsamp,EV=mean_EV_dt,EV_l=quant_EV_dt[1,],EV_h=quant_EV_dt[2,])
-plot_datIV_dt <- data.frame(time=tsamp,IV=mean_IV_dt,IV_l=quant_IV_dt[1,],IV_h=quant_IV_dt[2,])
-
-ggplot() +
-  # incorrect
-  geom_line(data=plot_datEV_ct,aes(x=time,y=EV),color="dodgerblue4") +
-  geom_ribbon(data=plot_datEV_ct,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue4") +
-  geom_line(data=plot_datIV_ct,aes(x=time,y=IV),color="firebrick4") +
-  geom_ribbon(data=plot_datIV_ct,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick4") +
-  # correct
-  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="dodgerblue2") +
-  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue2") +
-  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
-  geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
-  ylab("Counts") +
-  xlab("Time") +
-  theme_bw()
-
-# show individual trajectories
-ggplot() +
-  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="dodgerblue2") +
-  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
-  geom_line(data=traj_EV_dt,aes(x=time,y=count),color="dodgerblue2",alpha=0.25) +
-  geom_line(data=traj_IV_dt,aes(x=time,y=count),color="firebrick2",alpha=0.25) +
-  theme_bw()
-
-
-# test C++ version
-
-int_pars <- list(
-  ITNcov = 0.5, # ITN coverage
-  IRScov = 0.25, # IRS coverave
-  time_ITN_on = 1e4, # When ITNs are applied (days)
-  time_IRS_on = 1e4 # When IRS is applied (days)
-)
-
-
-sample_pop_cpp <- test_stochastic(time = time,dt = dt,
-                              EL_ = as.integer(eq_dt$EL_eq),
-                              LL_ = as.integer(eq_dt$LL_eq),
-                              PL_ = as.integer(eq_dt$PL_eq),
-                              SV_ = as.integer(eq_dt$SV_eq),
-                              EV_ = as.integer(eq_dt$EV_eq),
-                              IV_ = as.integer(IV_eq),
-                              K_ = eq_dt$K_eq,
-                              pars_ = theta_eq,int_pars_ = int_pars)
-
-
-sample_pop_cpp <- as.data.frame(sample_pop_cpp[,4:6])
-sample_pop_cpp <- cbind(time=time,sample_pop_cpp)
-sample_pop_cpp <- melt(sample_pop_cpp,"time")
-
-ggplot(data=sample_pop_cpp) +
-  geom_line(aes(x=time,y=value,color=variable)) +
-  theme_bw()
-
-
-# run ensemble of stochastic simulations
-# combine each matrix (sweep over cells) into a slice of a 3d array
-acomb <- function(...) abind(..., along=3)
-
-# progress bar
-pb <- txtProgressBar(max = nruns, style=3)
-progress <- function(n){setTxtProgressBar(pb, n)}
-opts <- list(progress=progress)
-
-# array's 3rd dimension is over runs
-sample_pop_cpp <- foreach(i = 1:nruns, .combine = "acomb", .options.snow=opts,.packages=c("foreach")) %do% {
-
-  sample_pop <- test_stochastic(time = time,dt = dt,
-                                EL_ = as.integer(eq_dt$EL_eq),
-                                LL_ = as.integer(eq_dt$LL_eq),
-                                PL_ = as.integer(eq_dt$PL_eq),
-                                SV_ = as.integer(eq_dt$SV_eq),
-                                EV_ = as.integer(eq_dt$EV_eq),
-                                IV_ = as.integer(IV_eq),
-                                K_ = eq_dt$K_eq,
-                                pars_ = theta_eq,int_pars_ = int_pars)
 
   sample_pop
 }
@@ -664,58 +377,34 @@ traj_IV_cpp <- melt(sample_pop_cpp[,"IV",])
 colnames(traj_IV_cpp) <- c("time","run","count")
 
 quant_SV_cpp <- apply(X = sample_pop_cpp[,"SV",],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
+  quantile(x,probs = quant_95)
 })
 quant_EV_cpp <- apply(X = sample_pop_cpp[,"EV",],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
+  quantile(x,probs = quant_95)
 })
 quant_IV_cpp <- apply(X = sample_pop_cpp[,"IV",],MARGIN = 1,FUN = function(x){
-  quantile(x,probs = c(0.05,0.95))
+  quantile(x,probs = quant_95)
 })
 
+plot_datSV_cpp <- data.frame(time=time,SV=mean_SV_cpp,SV_l=quant_SV_cpp[1,],SV_h=quant_SV_cpp[2,])
 plot_datEV_cpp <- data.frame(time=time,EV=mean_EV_cpp,EV_l=quant_EV_cpp[1,],EV_h=quant_EV_cpp[2,])
 plot_datIV_cpp <- data.frame(time=time,IV=mean_IV_cpp,IV_l=quant_IV_cpp[1,],IV_h=quant_IV_cpp[2,])
 
+# plot mean and 95% quantiles
 ggplot() +
-  # C++
-  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="darkorchid4") +
-  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid4") +
+  geom_line(data=plot_datSV_cpp,aes(x=time,y=SV),color="darkorchid4") +
+  geom_ribbon(data=plot_datSV_cpp,aes(x=time,ymin=SV_l,ymax=SV_h),alpha=0.35,fill="darkorchid4") +
+  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="dodgerblue4") +
+  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue4") +
   geom_line(data=plot_datIV_cpp,aes(x=time,y=IV),color="firebrick4") +
   geom_ribbon(data=plot_datIV_cpp,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick4") +
-  # R
-  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="darkorchid2") +
-  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid2") +
-  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
-  geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
   ylab("Counts") +
   xlab("Time") +
   theme_bw()
 
+# plot individual simulation trajectores (takes a while)
 ggplot() +
-  # geom_line(data=traj_EV_dt,aes(x=time,y=count),color="dodgerblue2",alpha=0.25) +
-  # geom_line(data=traj_IV_dt,aes(x=time,y=count),color="firebrick2",alpha=0.25) +
-  geom_line(data=traj_SV_cpp,aes(x=time,y=count,group=run),linetype=1,color="mediumpurple3",alpha=0.1) +
+  geom_line(data=traj_SV_cpp,aes(x=time,y=count,group=run),linetype=1,color="darkorchid4",alpha=0.1) +
   geom_line(data=traj_EV_cpp,aes(x=time,y=count,group=run),linetype=1,color="dodgerblue4",alpha=0.1) +
   geom_line(data=traj_IV_cpp,aes(x=time,y=count,group=run),linetype=1,color="firebrick4",alpha=0.1) +
   theme_bw()
-
-library(tikzDevice)
-
-tikz(file = "svcom.tex", width = 12, height = 8)
-
-ggplot() +
-  # C++
-  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="darkorchid4") +
-  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid4") +
-  geom_line(data=plot_datIV_cpp,aes(x=time,y=IV),color="firebrick4") +
-  geom_ribbon(data=plot_datIV_cpp,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick4") +
-  # R
-  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="darkorchid2") +
-  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid2") +
-  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
-  geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
-  ylab("Counts") +
-  xlab("Time") +
-  theme_bw()
-
-dev.off()
