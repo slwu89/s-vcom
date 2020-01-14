@@ -96,7 +96,7 @@ jac_g <- function(x){
 # calculate equilibrium values for state variables (and K)
 # from given FOI on mosquitoes and IV
 # (these are obtainable from solving human equations at equilibrium)
-calc_eq <- function(theta,dt,IV,lambdaV){
+calc_eq <- function(theta,dt,IV,lambdaV,sd=0.25,nstart=250){
   
   # get approximate values from the continuous-time model
   approx <- approx_equilibrium(theta,lambdaV,IV)
@@ -152,15 +152,20 @@ calc_eq <- function(theta,dt,IV,lambdaV){
   ci <- rep(0,4) # k
   
   # from many starting points
-  nstart <- 1e3
-  starts <- replicate(n = nstart,expr = {pmax(0,rnorm(n = 3,mean = approx,sd = approx*0.1))},simplify = FALSE)
+  mins <- approx - (approx*sd)
+  maxs <- approx + (approx*sd)
+  p <- ncol(ui)
+  starts <- as.list(data.frame(t(lhs::randomLHS(n = nstart,k = p))))
+  starts <- lapply(starts,function(x){
+    qunif(p = x,min = mins,max = maxs)
+  })
   
   control <- list(trace=6,maxit=1e3,reltol=1e-10)
-  opt <-  pbmcapply::pbmclapply(X = starts,FUN = function(start){
+  opt <-  lapply(X = starts,FUN = function(start){
     constrOptim(theta = start,f = obj_f,grad = grad_f,
                 ui = ui,ci = ci, method = "Nelder-Mead",
                 control=control,outer.eps = 1e-6,outer.iterations = 2e2)
-  },mc.cores = 4)
+  })
   
   min <- which.min(sapply(opt,function(x){x$value}))
   

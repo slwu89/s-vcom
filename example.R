@@ -23,8 +23,8 @@ library(doSNOW)
 library(parallel)
 library(abind) # for abind
 
-source(here("mosquito_equilibria.R"))
-Rcpp::sourceCpp(here("mosquito_sim.cpp"))
+source(here("sim-src/mosquito-equilibrium.R"))
+Rcpp::sourceCpp(here("sim-src/mosquito-both.cpp"))
 
 
 ###############################################################################
@@ -96,7 +96,7 @@ theta <- list(
 # deterministic approximation
 ###############################################################################
 
-source(here("mosquito_deterministic.R"))
+source(here("sim-src/mosquito-deterministic.R"))
 
 # run model against continuous-time equilibria
 with(theta,{
@@ -278,7 +278,7 @@ ggplot(data=deterministic_comp) +
 # stochastic approximation
 ###############################################################################
 
-source(here("mosquito_stochastic.R"))
+source(here("sim-src/mosquito-stochastic.R"))
 
 # run model against continuous-time equilibria
 with(theta,{
@@ -601,13 +601,13 @@ plot_datIV_cpp <- data.frame(time=time,IV=mean_IV_cpp,IV_l=quant_IV_cpp[1,],IV_h
 
 ggplot() +
   # C++
-  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="dodgerblue4") +
-  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue4") +
+  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="darkorchid4") +
+  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid4") +
   geom_line(data=plot_datIV_cpp,aes(x=time,y=IV),color="firebrick4") +
   geom_ribbon(data=plot_datIV_cpp,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick4") +
   # R
-  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="dodgerblue2") +
-  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="dodgerblue2") +
+  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="darkorchid2") +
+  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid2") +
   geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
   geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
   ylab("Counts") +
@@ -621,3 +621,24 @@ ggplot() +
   geom_line(data=traj_EV_cpp,aes(x=time,y=count,group=run),linetype=1,color="dodgerblue4",alpha=0.1) +
   geom_line(data=traj_IV_cpp,aes(x=time,y=count,group=run),linetype=1,color="firebrick4",alpha=0.1) +
   theme_bw()
+
+library(tikzDevice)
+
+tikz(file = "svcom.tex", width = 12, height = 8)
+
+ggplot() +
+  # C++
+  geom_line(data=plot_datEV_cpp,aes(x=time,y=EV),color="darkorchid4") +
+  geom_ribbon(data=plot_datEV_cpp,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid4") +
+  geom_line(data=plot_datIV_cpp,aes(x=time,y=IV),color="firebrick4") +
+  geom_ribbon(data=plot_datIV_cpp,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick4") +
+  # R
+  geom_line(data=plot_datEV_dt,aes(x=time,y=EV),color="darkorchid2") +
+  geom_ribbon(data=plot_datEV_dt,aes(x=time,ymin=EV_l,ymax=EV_h),alpha=0.35,fill="darkorchid2") +
+  geom_line(data=plot_datIV_dt,aes(x=time,y=IV),color="firebrick2") +
+  geom_ribbon(data=plot_datIV_dt,aes(x=time,ymin=IV_l,ymax=IV_h),alpha=0.35,fill="firebrick2") +
+  ylab("Counts") +
+  xlab("Time") +
+  theme_bw()
+
+dev.off()
